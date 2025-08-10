@@ -1,5 +1,6 @@
 # https://github.com/odysseusmax/animated-lamp/blob/master/bot/database/database.py
 import motor.motor_asyncio
+import ssl
 from info import DATABASE_NAME, DATABASE_URI, IMDB, IMDB_TEMPLATE, MELCOW_NEW_USERS, P_TTI_SHOW_OFF, SINGLE_BUTTON, SPELL_CHECK_REPLY, PROTECT_CONTENT, AUTO_DELETE, MAX_BTN, AUTO_FFILTER, SHORTLINK_API, SHORTLINK_URL, IS_SHORTLINK, TUTORIAL, IS_TUTORIAL
 import datetime
 import pytz
@@ -7,11 +8,44 @@ import pytz
 class Database:
     
     def __init__(self, uri, database_name):
-        self._client = motor.motor_asyncio.AsyncIOMotorClient(uri)
+        try:
+            # First attempt: Try with tlsInsecure=true
+            if '?' in uri:
+                connection_uri = uri + "&tlsInsecure=true"
+            else:
+                connection_uri = uri + "?tlsInsecure=true"
+            
+            self._client = motor.motor_asyncio.AsyncIOMotorClient(
+                connection_uri,
+                serverSelectionTimeoutMS=30000,  # 30 second timeout
+                connectTimeoutMS=20000,          # 20 second connection timeout
+                socketTimeoutMS=20000,           # 20 second socket timeout
+                retryWrites=True
+            )
+        except Exception as e:
+            print(f"Primary connection failed: {e}")
+            try:
+                # Fallback: Try with custom SSL context
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                
+                self._client = motor.motor_asyncio.AsyncIOMotorClient(
+                    uri,
+                    ssl_context=ssl_context,
+                    serverSelectionTimeoutMS=30000,
+                    connectTimeoutMS=20000,
+                    socketTimeoutMS=20000
+                )
+            except Exception as e2:
+                print(f"Fallback connection failed: {e2}")
+                # Last resort: Basic connection
+                self._client = motor.motor_asyncio.AsyncIOMotorClient(uri)
+        
         self.db = self._client[database_name]
         self.col = self.db.users
         self.grp = self.db.groups
-        self.users = self.db.uersz
+        self.users = self.db.uersz  # Note: keeping original typo for compatibility
         self.req = self.db.requests
         
     async def find_join_req(self, id):
@@ -19,24 +53,24 @@ class Database:
         
     async def add_join_req(self, id):
         await self.req.insert_one({'id': id})
+        
     async def del_join_req(self):
         await self.req.drop()
 
     def new_user(self, id, name):
         return dict(
-            id = id,
-            name = name,
+            id=id,
+            name=name,
             ban_status=dict(
                 is_banned=False,
                 ban_reason="",
             ),
         )
 
-
     def new_group(self, id, title):
         return dict(
-            id = id,
-            title = title,
+            id=id,
+            title=title,
             chat_status=dict(
                 is_disabled=False,
                 reason="",
@@ -48,7 +82,7 @@ class Database:
         await self.col.insert_one(user)
     
     async def is_user_exist(self, id):
-        user = await self.col.find_one({'id':int(id)})
+        user = await self.col.find_one({'id': int(id)})
         return bool(user)
     
     async def total_users_count(self):
@@ -74,48 +108,45 @@ class Database:
             is_banned=False,
             ban_reason=''
         )
-        user = await self.col.find_one({'id':int(id)})
+        user = await self.col.find_one({'id': int(id)})
         if not user:
             return default
         return user.get('ban_status', default)
 
     async def get_all_users(self):
         return self.col.find({})
-    
 
     async def delete_user(self, user_id):
         await self.col.delete_many({'id': int(user_id)})
 
-
     async def get_banned(self):
-        users = self.col.find({'ban_status.is_banned': True})
-        chats = self.grp.find({'chat_status.is_disabled': True})
-        b_chats = [chat['id'] async for chat in chats]
-        b_users = [user['id'] async for user in users]
-        return b_users, b_chats
-    
-
+        try:
+            users = self.col.find({'ban_status.is_banned': True})
+            chats = self.grp.find({'chat_status.is_disabled': True})
+            b_chats = [chat['id'] async for chat in chats]
+            b_users = [user['id'] async for user in users]
+            return b_users, b_chats
+        except Exception as e:
+            print(f"Error in get_banned: {e}")
+            return [], []
 
     async def add_chat(self, chat, title):
-        chat = self.new_group(chat, title)
-        await self.grp.insert_one(chat)
-    
+        chat_doc = self.new_group(chat, title)
+        await self.grp.insert_one(chat_doc)
 
     async def get_chat(self, chat):
-        chat = await self.grp.find_one({'id':int(chat)})
-        return False if not chat else chat.get('chat_status')
-    
+        chat_doc = await self.grp.find_one({'id': int(chat)})
+        return False if not chat_doc else chat_doc.get('chat_status')
 
     async def re_enable_chat(self, id):
-        chat_status=dict(
+        chat_status = dict(
             is_disabled=False,
             reason="",
-            )
+        )
         await self.grp.update_one({'id': int(id)}, {'$set': {'chat_status': chat_status}})
         
     async def update_settings(self, id, settings):
         await self.grp.update_one({'id': int(id)}, {'$set': {'settings': settings}})
-        
     
     async def get_settings(self, id):
         default = {
@@ -135,28 +166,24 @@ class Database:
             'tutorial': TUTORIAL,
             'is_tutorial': IS_TUTORIAL
         }
-        chat = await self.grp.find_one({'id':int(id)})
+        chat = await self.grp.find_one({'id': int(id)})
         if chat:
             return chat.get('settings', default)
         return default
-    
 
     async def disable_chat(self, chat, reason="No Reason"):
-        chat_status=dict(
+        chat_status = dict(
             is_disabled=True,
             reason=reason,
-            )
+        )
         await self.grp.update_one({'id': int(chat)}, {'$set': {'chat_status': chat_status}})
-    
 
     async def total_chat_count(self):
         count = await self.grp.count_documents({})
         return count
-    
 
     async def get_all_chats(self):
         return self.grp.find({})
-
 
     async def get_db_size(self):
         return (await self.db.command("dbstats"))['dataSize']
@@ -164,6 +191,7 @@ class Database:
     async def get_user(self, user_id):
         user_data = await self.users.find_one({"id": user_id})
         return user_data
+        
     async def update_user(self, user_data):
         await self.users.update_one({"id": user_data["id"]}, {"$set": user_data}, upsert=True)
 
@@ -179,13 +207,9 @@ class Database:
             else:
                 await self.users.update_one({"id": user_id}, {"$set": {"expiry_time": None}})
         return False
-        
-    async def update_user(self, user_data):
-        await self.users.update_one({"id": user_data["id"]}, {"$set": user_data}, upsert=True)
 
     async def update_one(self, filter_query, update_data):
         try:
-            # Assuming self.client and self.users are set up properly
             result = await self.users.update_one(filter_query, update_data)
             return result.matched_count == 1
         except Exception as e:
@@ -194,9 +218,12 @@ class Database:
 
     async def get_expired(self, current_time):
         expired_users = []
-        if data := self.users.find({"expiry_time": {"$lt": current_time}}):
-            async for user in data:
-                expired_users.append(user)
+        try:
+            if data := self.users.find({"expiry_time": {"$lt": current_time}}):
+                async for user in data:
+                    expired_users.append(user)
+        except Exception as e:
+            print(f"Error getting expired users: {e}")
         return expired_users
 
     async def remove_premium_access(self, user_id):
@@ -211,11 +238,16 @@ class Database:
         return False
 
     async def give_free_trial(self, user_id):
-        #await set_free_trial_status(user_id)
         user_id = user_id
-        seconds = 5*60         
+        seconds = 5 * 60  # 5 minutes
         expiry_time = datetime.datetime.now() + datetime.timedelta(seconds=seconds)
         user_data = {"id": user_id, "expiry_time": expiry_time, "has_free_trial": True}
         await self.users.update_one({"id": user_id}, {"$set": user_data}, upsert=True)
-        
+
+    async def close_connection(self):
+        """Close the database connection"""
+        if hasattr(self, '_client'):
+            self._client.close()
+
+# Create the database instance
 db = Database(DATABASE_URI, DATABASE_NAME)
